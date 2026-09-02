@@ -13,6 +13,22 @@ const goals = [
   "Something else",
 ];
 
+const WEB3FORMS_ENDPOINT = "https://api.web3forms.com/submit";
+
+function isValidEmail(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function isValidUrl(value: string) {
+  if (!value) return true; // optional field
+  try {
+    const url = new URL(value.startsWith("http") ? value : `https://${value}`);
+    return Boolean(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export default function LeadForm() {
   const [status, setStatus] = useState<Status>("idle");
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -20,37 +36,76 @@ export default function LeadForm() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setStatus("submitting");
     setErrors({});
     setServerMessage(null);
 
     const form = event.currentTarget;
     const data = new FormData(form);
 
-    const payload = {
-      name: String(data.get("name") ?? ""),
-      email: String(data.get("email") ?? ""),
-      websiteUrl: String(data.get("websiteUrl") ?? ""),
-      businessName: String(data.get("businessName") ?? ""),
-      targetLocation: String(data.get("targetLocation") ?? ""),
-      goal: String(data.get("goal") ?? ""),
-      message: String(data.get("message") ?? ""),
-      consent: data.get("consent") === "on",
-      company_website: String(data.get("company_website") ?? ""), // honeypot
-    };
+    // Honeypot — bots fill this hidden field, humans never see it.
+    if (String(data.get("company_website") ?? "").trim()) {
+      setStatus("success");
+      form.reset();
+      return;
+    }
+
+    const name = String(data.get("name") ?? "").trim();
+    const email = String(data.get("email") ?? "").trim();
+    const websiteUrl = String(data.get("websiteUrl") ?? "").trim();
+    const consent = data.get("consent") === "on";
+
+    const nextErrors: Record<string, string> = {};
+    if (!name) nextErrors.name = "Please enter your full name.";
+    if (!email || !isValidEmail(email)) nextErrors.email = "Please enter a valid email address.";
+    if (websiteUrl && !isValidUrl(websiteUrl)) nextErrors.websiteUrl = "Please enter a valid website URL.";
+    if (!consent) nextErrors.consent = "Please confirm you're happy to be contacted.";
+
+    if (Object.keys(nextErrors).length > 0) {
+      setErrors(nextErrors);
+      setStatus("error");
+      setServerMessage("Please check the form for errors.");
+      return;
+    }
+
+    const accessKey = process.env.NEXT_PUBLIC_WEB3FORMS_ACCESS_KEY;
+    if (!accessKey) {
+      setStatus("error");
+      setServerMessage("This form isn't fully configured yet. Please try again later.");
+      return;
+    }
+
+    setStatus("submitting");
+
+    const businessName = String(data.get("businessName") ?? "").trim();
+    const targetLocation = String(data.get("targetLocation") ?? "").trim();
+    const goal = String(data.get("goal") ?? "").trim();
+    const message = String(data.get("message") ?? "").trim();
 
     try {
-      const response = await fetch("/api/lead", {
+      // Web3Forms' free tier only accepts submissions sent directly from the
+      // browser (server-to-server calls are rejected) — so this posts straight
+      // to their API, the way Web3Forms' own integration snippet does.
+      const response = await fetch(WEB3FORMS_ENDPOINT, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          access_key: accessKey,
+          subject: `New SEO enquiry from ${name}${businessName ? ` (${businessName})` : ""}`,
+          from_name: "Rank Page 1 — SEO Enquiry Form",
+          name,
+          email,
+          website_url: websiteUrl || "Not provided",
+          business_name: businessName || "Not provided",
+          target_location: targetLocation || "Not provided",
+          main_seo_goal: goal || "Not provided",
+          message: message || "Not provided",
+        }),
       });
       const result = await response.json();
 
       if (!response.ok || !result.success) {
         setStatus("error");
-        setErrors(result.errors ?? {});
-        setServerMessage(result.message ?? "Please check the form and try again.");
+        setServerMessage("We couldn't send your enquiry. Please try again shortly.");
         return;
       }
 
@@ -58,7 +113,7 @@ export default function LeadForm() {
       form.reset();
     } catch {
       setStatus("error");
-      setServerMessage("Something went wrong. Please try again in a moment.");
+      setServerMessage("Something went wrong sending your enquiry. Please try again.");
     }
   }
 
